@@ -55,8 +55,7 @@
    13 Mar 2024 - V1.0.40 : force position after plasma probe, fix plasma linearization of small arcs to avoid GRBL bug in arc after probe, fix pierceClearance and pierceHeight, fix plasma kerfWidth
    27 Mar 2024 - V1.0.41 : replace 'power' with OB.power (and friends) because postprocessor.power now exists and is readonly
    30 Mar 2024 - V1.0.42 : postprocessor.alert() method has disappeared - replaced with warning(msg) and writeComment(msg), moved more stuff into OB. and SPL.
-   10 Jul 2024 - V1.0.43 : A. Sandoval - Fix leadInRate conversion when unit is inch, Add switch to disable G53 (Arduino GRBL 1.1 otherwise a
-                           requires reset between uses and has other problems with plasma machines), Output F[leadInRate] after Z-probe)
+   12 Jul 2024 - V1.0.43 : Fix conversion of leadinRate when in inch mode - prevents Z-axis crashes due to acceleration when mm is sent as inches.
 */
 obversion = 'V1.0.43';
 description = "OpenBuilds CNC : GRBL/BlackBox";  // cannot have brackets in comments
@@ -100,13 +99,12 @@ var SPL =
 // user-defined properties : defaults are set, but they can be changed from a dialog box in Fusion when doing a post.
 properties =
    {
-   spindleOnOffDelay: 0.7,        // time (in seconds) the spindle needs to get up to speed or stop, or laser/plasma pierce delay
+   spindleOnOffDelay: 1.8,        // time (in seconds) the spindle needs to get up to speed or stop, or laser/plasma pierce delay
    spindleTwoDirections : false,  // true : spindle can rotate clockwise and counterclockwise, will send M3 and M4. false : spindle can only go clockwise, will only send M3
    hasCoolant : false,            // true : machine uses the coolant output, M8 M9 will be sent. false : coolant output not connected, so no M8 M9 will be sent
    routerType : "other",
    generateMultiple: true,        // specifies if a file should be generated for each tool change
    splitLines: 0,                 // if > 0 then split on line count (and tool change if that is also set)
-   useG53 : true,   // Use G53 Machine Coordinate System
    machineHomeZ : -10,            // absolute machine coordinates where the machine will move to at the end of the job - first retracting Z, then moving home X Y
    machineHomeX : -10,            // always in millimeters
    machineHomeY : -10,
@@ -136,7 +134,7 @@ properties =
 groupDefinitions =
    {
    //postInfo: {title: "OpenBuilds Post Documentation: https://docs.openbuilds.com/doku.php", description: "", order: 0},
-   spindle: {title: "Spindle/Plasma", description: "Spindle and Plasma Cutter options", order: 1},
+   spindle: {title: "Spindle", description: "Spindle options", order: 1},
    safety: {title: "Safety", description: "Safety options", order: 2},
    toolChange: {title: "Tool Changes", description: "Tool change options", order: 3},
    startEndPos: {title: "Job Start Z and Job End X,Y,Z Coordinates", description: "Set the spindle start and end position", order: 4},
@@ -174,7 +172,7 @@ propertyDefinitions =
       },
    spindleOnOffDelay:  {
       group: "spindle",
-      title: "SPINDLE on/off or Plasma Pierce Delay",
+      title: "SPINDLE on/off delay",
       description: "Time (in seconds) the spindle needs to get up to speed or stop, also used for plasma pierce delay",
       type: "number",
       },
@@ -210,12 +208,6 @@ propertyDefinitions =
          type: "number",
          },      
 
-   useG53: {
-      group: "startEndPos",
-      title: "G53: Enable G53 Machine Coordinate System",
-      description:"G53 Machine Coordinate System vs. G54 Work Coordinate System",
-      type:"boolean",
-   },
    gotoMCSatend: {
       group: "startEndPos",
       title: "EndPos: Use Machine Coordinates (G53) at end of job?",
@@ -279,8 +271,8 @@ propertyDefinitions =
    };
 
 // USER ADJUSTMENTS FOR PLASMA
-plasma_probedistance = 120;   // distance to probe down in Z, always in millimeters
-plasma_proberate = 200;      // feedrate for probing, in mm/minute
+plasma_probedistance = 30;   // distance to probe down in Z, always in millimeters
+plasma_proberate = 100;      // feedrate for probing, in mm/minute
 // END OF USER ADJUSTMENTS
 
 
@@ -1048,11 +1040,8 @@ function gotoInitial(checkit)
 function writeZretract()
    {
    zOutput.reset();
-   if (properties.useG53)
-      {
-      writeln("(This relies on homing, see https://openbuilds.com/search/127200199/?q=G53+fusion )");
-      writeBlock(gFormat.format(53), gMotionModal.format(0), zOutput.format(toPreciseUnit( properties.machineHomeZ, MM)));  // Retract spindle to Machine Z Home
-      }
+   writeln("(This relies on homing, see https://openbuilds.com/search/127200199/?q=G53+fusion )");
+   writeBlock(gFormat.format(53), gMotionModal.format(0), zOutput.format(toPreciseUnit( properties.machineHomeZ, MM)));  // Retract spindle to Machine Z Home
    gMotionModal.reset();
    zOutput.reset();
    }
@@ -1970,13 +1959,12 @@ function onCommand(command)
                   writeln("");
                   writeBlock( "G38.2", zOutput.format(toPreciseUnit(-plasma_probedistance, MM)), feedOutput.format(toPreciseUnit(plasma_proberate, MM)));
                   if (debugMode) writeComment("touch offset "  + xyzFormat.format(properties.plasma_touchoffOffset) );
-                  writeBlock( feedOutput.format(OB.leadinRate), gMotionModal.format(10), "L20", zOutput.format(toPreciseUnit(-properties.plasma_touchoffOffset, MM)) );
+                  writeBlock( gMotionModal.format(10), "L20", zOutput.format(toPreciseUnit(-properties.plasma_touchoffOffset, MM)) );
                   feedOutput.reset();
                   // force a G0 to existing position after the probe because this appears to avoid a GRBL bug in small arcs when arcing
                   // from an existing position after probing.
                   xOutput.reset();
                   yOutput.reset();
-                  zOutput.reset();
                   var cpos = getCurrentPosition();
                   writeBlock(gMotionModal.format(0), xOutput.format(cpos.x), yOutput.format(cpos.y), " ; force position after probe");
                   }
@@ -2015,13 +2003,13 @@ function onParameter(name, value)
 
    if (name.indexOf("movement:lead_in") != -1)
       {
-      OB.leadinRate = value;	// This is in mm/min, not inches/min!
-      if (debugMode && OB.isPlasma) writeComment("onparameter - leadinRate set " + OB.leadinRate);
+      OB.leadinRate = value;	// This is in mm/min, not inches/min
       if (unit != MM)
-      	 {
-      	 	OB.leadinRate = value / 25.4;	// Convert mm to inches!  (Otherwise 90 in/min becomes 2286 in/min, causing acceleration based crashes!)
-      	 	writeComment("onparameter - leadinRate CONVERTED to in/min: " + OB.leadinRate);
-      	 }
+         {
+         OB.leadinRate = value / 25.4;  // Convert mm to inches
+         if (debugMode) writeComment("onparameter - leadinRate converted to in/min:" + OB.leadinRate);
+         }
+      if (debugMode && OB.isPlasma) writeComment("onparameter - leadinRate set " + OB.leadinRate);
       }
 
    if (name.indexOf("operation:topHeight_value") >= 0)
